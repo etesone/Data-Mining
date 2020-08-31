@@ -1,0 +1,232 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+```{r}
+source("Funciones_Clust.R")
+
+source("Funciones_R.R")
+
+paquetes(c("qgraph","devtools", "FactoMineR", "RcmdrMisc","GPArotation",
+           "factoextra","cluster","fpc", "clValid","reshape","dplyr","ISLR","corrplot",
+           "ggcorrplot","psych","gridExtra"))
+```
+
+```{r}
+datos_EE <- readRDS("EleccionesEspanaDep")
+```
+
+# Clustering
+## Selección de variables
+Para este ejercicio uso el dataset usado en la evaluacion I. He seleccionado las variables de: Izquierda, edades de 04, menores de 19, edades etre 19 y 65, desempleo mayor al 40%, porcentaje de mujeres, misma comunidad autonoma, desempleo entre 25 y 40%, desempleo en servicios y cambio de poblacion. 
+
+```{r}
+elecciones <- data.frame(datos_EE %>% group_by(CCAA) %>% summarise(
+  Izquierda= mean(varObjCont),
+  Edad_0_4 = mean(Age_0to4_Ptge),
+  Edad_menos_19 = mean(Age_under19_Ptge),
+  Edad_19_65 = mean(Age_19_65_pct),
+  Desempleo_40_Pct = mean(UnemployMore40_Ptge),
+  Pct_Mujeres = mean(WomanPopulationPtge),
+  Misma_Comunidad = mean(SameComAutonPtge),
+  Desempleo_25_40_Pct = mean(Unemploy25_40_Ptge),
+  Desempleo_Servicios = mean(ServicesUnemploymentPtge),
+  Cambio_Poblacion = mean(PobChange_pct)
+))
+```
+
+Revisar la correlación del dataset con un correlograma. Encuentro correlación alta negativa de la variable de porcentaje de parados mayores de 40 años frente al al porcentaje de votos de izquierda. 
+
+En correlaciones positivas, hay una alta relación entre población, empresas y explotaciones,. 
+
+
+```{r}
+cor <- round(cor(Filter(is.numeric, elecciones)),1)
+ggcorrplot(cor, hc.order = TRUE, type = "lower",
+   outline.col = "white", lab=T,
+   ggtheme = ggplot2::theme_gray,
+   colors = c("#E46726", "white", "#6D9EC1")) + ggtitle('Correlación entre variables seleccionadas')
+```
+
+```{r}
+# Muevo la columna de comunidades a los nombres de fila, me será imprescindible en las gráficas.
+rownames(elecciones) <- elecciones$CCAA
+elecciones$CCAA <- NULL
+```
+
+¿Qué distancia utilizar?
+Con las variables escaladas, voy a visualizar 4 matrices de distancia: Euclidea, Manhattan y, basadas en correlación, Pearson y Spearman:
+
+```{r}
+
+dist_euclidea <- get_dist(elecciones, stand = T, method = "euclidean")
+d1 <- fviz_dist(dist_euclidea, gradient = list(low = "#E46726", mid = "white", high = "#6D9EC1"), lab_size = 6)+ggtitle('Distancia Euclídea')
+
+dist_spearman <- get_dist(elecciones, stand = T, method = "spearman")
+d2 <- fviz_dist(dist_spearman, gradient = list(low = "#E46726", mid = "white", high = "#6D9EC1"), lab_size = 6)+ggtitle('Distancia Spearman')
+
+dist_manhattan <- get_dist(elecciones, stand = T, method = "manhattan")
+d3 <- fviz_dist(dist_manhattan, gradient = list(low = "#E46726", mid = "white", high = "#6D9EC1"), lab_size = 6)+ggtitle('Distancia Manhattan')
+
+dist_pearson <- get_dist(elecciones, stand = T, method = "pearson")
+d4 <- fviz_dist(dist_pearson, gradient = list(low = "#E46726", mid = "white", high = "#6D9EC1"), lab_size = 6)+ggtitle('Distancia Pearson')
+
+grid.arrange(d1, d2, d3, d4, ncol=2)
+
+```
+
+Basado en la inspección visual, las matrices de distancia basada en correlación parecen 'intensificar' ligeramente las separaciones entre grupos. Mo veo razón para desechar la distancia euclidea. 
+
+```{r}
+hc_complete <- hclust(dist_euclidea, method = 'complete')
+c1 <- fviz_dend(hc_complete, k = 4, cex = 0.5, color_labels_by_k = T, rect = T, main = 'complete')
+
+hc_ward <- hclust(dist_euclidea, method = 'ward.D2')
+c2 <- fviz_dend(hc_ward, k = 4, cex = 0.5, color_labels_by_k = T, rect = T, main = 'ward.D2')
+
+hc_ward <- hclust(dist_euclidea, method = 'mcquitty')
+c3 <- fviz_dend(hc_ward, k = 4, cex = 0.5, color_labels_by_k = T, rect = T, main = 'mcquitty')
+
+hc_ward <- hclust(dist_euclidea, method = 'average')
+c4 <- fviz_dend(hc_ward, k = 4, cex = 0.5, color_labels_by_k = T, rect = T, main = 'average')
+```
+
+
+```{r}
+grid.arrange(c1,c2,c3,c4, ncol=2)
+```
+
+
+
+```{r include=FALSE}
+# Exploramos clustering jerárquico con distintos Linkages
+methods <- c('complete','average','ward.D2', 'mcquitty')
+hclist <- list()
+val.hc <- c()
+for (i in 1:length(methods)){
+  hc <- hclust(dist_euclidea,method=methods[i])
+  hclist[[i]] <- hc
+ # Validación interna
+ cl <- cutree(hc, k = 4) 
+ md.val <- medidasVal(elecciones,cl,cl,methods[i])
+ 
+ # Generar vector de medidas de validación
+ val.hc <- rbind(val.hc,md.val)#Podemos seleccionar otras medidas en la función medidasVal()
+}
+
+```
+
+
+```{r include=FALSE}
+names(hclist) <- rownames(val.hc)<-methods
+```
+
+Aplico el método **kmeans**, nuevamente con un k=4 para comparalos con los linkages anteriores. Esta vez, para probar el efecto de inicialización aleatoria de los centroides, genero 4 cluster plots, cada uno con semilla de inicialización distinta: 
+
+```{r}
+# k-means con 4 grupos
+set.seed(232)
+km.out <- kmeans(dist_euclidea,4)
+fviz_cluster(km.out, data = elecciones,  ellipse.type = "convex", palette = "jco", repel = TRUE, labelsize = 6,
+             ggtheme = theme_gray() + theme(text = element_text(size = 7.5),
+        axis.title = element_text(size = 7.5),
+        axis.text = element_text(size = 7.5)))
+
+```
+
+Sigamos.
+
+```{r}
+hk.out <- hkmeans(elecciones, 4)
+hkmeans_tree(hk.out, cex = 0.6)
+fviz_cluster(hk.out, data = elecciones,  ellipse.type = "convex", palette = "jco",repel = TRUE,
+             ggtheme = theme_gray())
+```
+
+Este método ha generado clusters ligeramente diferentes a los vistos con métodos anteriores... Revisemos medidas de silueta y varianza interna:
+
+```{r include=FALSE}
+kMeans_med <- medidasVal(elecciones,km.out$cluster, km.out$cluster,'kmeans')
+```
+
+```{r include=FALSE}
+hKMeans_med <- medidasVal(elecciones,hk.out$cluster,hk.out$cluster,'hkmeans')
+```
+
+```{r echo=FALSE}
+ValT <- rbind(val.hc,kMeans_med,hKMeans_med)
+ValT
+```
+
+Según estas medidas, los clusters con miembros más cercanos con menor varianza interna del grupo (wss) son los generados por HKmeans y Ward. Las mayores siluetas las tienen hkmeans y ward tambien.
+
+Un paso más, ¿Qué pasaría si no escojo k=4 en toda la parte anterior, y dejo que la mejor silueta a partir de un método de cluster alrededor de 'medoids' con el **método PAM**, decida el número óptimo de grupos? (Probé con mejor WSS, pero, imagino que por la dimensionalidad del dataset, la mejor cantidad de clusters era k=1, seguida de k=2.
+
+```{r}
+# Gráfico con mejor silueta por número de clusters:
+fviz_nbclust(elecciones, pam, method= 'silhouette')
+# fviz_nbclust(elecciones, pam, method= 'wss') # Esto me da mejor resultado en 1 seguido de 2...
+```
+
+Veamos los clusters según método PAM, escogiendo los 5 clusters que tendrían el mejor valor de silueta:
+```{r}
+# Pinto el plot con método PAM k=5:
+pam.res = pam(elecciones, 5)
+fviz_cluster(pam.res, ellipse=TRUE, show.clust.cent=TRUE, repel=TRUE, ggtheme=theme_gray())
+```
+
+```{r}
+Pam_med <- medidasVal(elecciones,pam.res$clustering, pam.res$clustering, 'PAM')
+ValT <- rbind(val.hc,kMeans_med,hKMeans_med, Pam_med)
+ValT
+```
+
+El método PAM no ha obtenido la mejor silueta pero si la mejor varianza explicada.
+
+# Reducción de dimensionalidad por componentes principales
+
+Me he decidido por PCA para reducir dimensionalidad del dataset, pues como se verá, bajo este método se logra identificar dos dimensiones que explican más del 80% de la varianza del set. Lo primero, reviso las medidas iniciales, para esto creo una matriz de correlaciones, calculo la determinante de la matriz, compruebo que no el dataset no tenga esfericidad y reviso el MSA de cada variable a través de un KMO para, de primera, excluir aquellas con puntajes muy inferiores.
+
+```{r}
+# Genero la matriz de correlación:
+cors <- RcmdrMisc::rcorr.adjust(elecciones, type="spearman", use="complete")
+
+# Reviso la determinante de la matriz:
+det(cors$R$r)
+
+# Test de esfericidad de Barret
+psych::cortest.bartlett(elecciones)
+
+# Indice de Adecuacion Muestral KMO
+psych::KMO(elecciones) 
+```
+
+¿Qué obtuve? Pues tengo una determinante muy pequeña (6.345101e-07) que demuestra que sí existe correlación (no es novedad luego de todo lo que hemos visto hasta ahora). Tengo un p-valor pequeño (9.130514e-19) en test de Barret, que me permite rechazar la hipótesis de tener un conjunto de datos hiper-esférico (y por tanto sin correlaciones). Con estas medidas, pinta bien para continuar el análisis por componentes principales. Como resultado del KMO, tengo cuatro variables debajo del umbral de 0.50 (Izquierda, Misma_Comunidad, Desempleo_40_Pct, Pct_Mujeres). 
+
+Realizo el análisis de componentes principales usando la función prcomp, dibujo el gráfico de sedimentación (scree plot) y reviso la varianza explicada acumulada por componente:
+
+
+```{r}
+# Creo el objeto tipo prcomp:
+elecciones_pca <- prcomp(elecciones)
+# Pinto el scree:
+screeplot(elecciones_pca, type = 'lines')
+# Reviso la varianza acumulada (tercera línea):
+summary(elecciones_pca)$importance
+
+```
+
+Los primeros tres componentes explican el 89.55% de la varianza del dataset, los dos primeros explican el 76.19% y solo la primera componente explica el 42.92%. Pasar de 2 a 3 componentes limita un poco la interpretabilidad, y explicar casi el 70% de la varianza con dos componentes no está mal. Para este ejercicio me limitaré a usar los dos primeros componentes.
+
+Clustering mejorado por PCA
+
+Para terminar, juntaré el mejor método de cluster definido antes (método PAM) y lo explicaré con las dos componentes principales obtenidas:
+
+```{r}
+# Pinto el plot con método PAM k=4 y usando solo los datos de los 2 componentes principales:
+pam_final = pam(elecciones_pca$x[,1:2], 4)
+fviz_cluster(pam_final, ellipse=TRUE, show.clust.cent=TRUE, repel=TRUE, ggtheme=theme_gray())
+```
+
+Como interpretacion final, según el potencial productivo (PC1) y el tamaño y orientación política, las comunidades autónomas pueden agruparse en 4 grupos, siendo los dos grupos más diferentes, en base a su distancia con el resto, el cluster formado por Valencia y Cataluña y el formado por CastillaLeón, Rioja y Galicia. ¿El mostrar clusters explicados por componentes principales mejora interpretación? Mucho! Pero definitivamente tiene mucho mayor impacto cuando hay la pregunta 'de negocio' sobre los datos, algo que no he definido en esta tarea. 

@@ -1,0 +1,596 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+## Evaluacion 1
+
+# Regresion Linear
+
+Subo el archivo DatosEleccionesEspana.xlsx junto con las librerias que voy a usar.
+
+```{r load, message=FALSE, warning=FALSE, include=FALSE}
+source("Funciones_R.R")
+
+paquetes(c("questionr","psych","car","corrplot","readxl","ggplot2","gdata",
+           "caret","lmSupport","rpart","glmnet","dplyr","epiDisplay","pROC","reshape"))
+
+datos_EE <- read_excel("DatosEleccionesEspana.xlsx")
+```
+
+Veo los atributos de los datos y decido que mi variable objetivo continua va a ser "Izda_Pct" y la binaria sera "Derecha." En este set de datos encontramos informacion sobre todos los municipios de Espana y sus medidas demograficas (edades, poblaciones, etc.), medidas de desempleo y medidas economicas (numero de empresas, sectores economicos principales, etc.). Intentaremos utilizar estas variables para predecir el porcentaje de los votos que iran destinados a los partidos de izquierda (PSOE y Podemos).
+
+```{r, message=FALSE, warning=FALSE}
+str(datos_EE)
+
+summary(datos_EE)
+```
+
+Quiero que la primera columna "Names" sea los nombres de fila pero veo que tiene valores duplicados por lo que creo una nueva variable, concateno con CCAA, borro la variable "Name" y muevo la nueva variable "NameConcat" al principio. Luego borro las variables "Name" y las objetivo que no voy a utilizar.
+
+Tambien recategoriso las variables que determino son factores, incluida "NameConcat" para convertirla luego con row.names.
+
+```{r, message=FALSE, warning=FALSE}
+datos_EE$NameConcat<- paste(datos_EE$Name, ', ', datos_EE$CCAA)
+
+datos_EE <- subset(datos_EE, select=c(NameConcat,Name:Explotaciones))
+
+datos_EE<- as.data.frame(datos_EE[,-c(2,7:8,10:12)])
+
+sapply(Filter(is.numeric, datos_EE),function(x) length(unique(x)))
+
+datos_EE[,c(1,3,7,29,33)] <- lapply(datos_EE[,c(1,3,7,29,33)], factor) # convierto la variable NameConcat a factor para luego convertirlo a nombres de fila
+```
+
+Utilizo dfplot para ver las distribuciones de las variables. Hay un grupo grande de variables numericas que no tienen una distribucion normal. A todas estas variables voy a transformarlas a categoricas utilizando rpart y la variable objetivo continua.
+
+```{r, message=FALSE, warning=FALSE}
+dfplot(datos_EE)
+```
+
+Empiezo la limpieza de datos cambiando el nombre de la variable Age_0-4_Ptge ya que mas adelante en la validacion cruzada me dara un error por no poder leer bien la variable.
+
+Luego vemos que la variable Densidad contiene una categoria "?" y lo cambiamos por NA.
+
+A la variable CCAA la recategorize de un par de maneras: geograficamente y utilizando rpart. Ambas maneras de recategorizar dieron malos resultados a la hora de hacer los modelos por lo que decidi dejarlas sin agrupar con la excepcion de Ceuta, Melilla y Baleares. Esto es porque Ceuta y Melilla tienen solo un valor y geograficamente tenia sentido agruparlas con Baleares. Me dio muy buen resultado a la hora de crear los modelos.
+
+ForeignersPtge tenia porcentages negativos, fuera de rango. Esos valores fueron reemplazados por NA.
+
+```{r, message=FALSE, warning=FALSE}
+datos_EE<-reshape::rename(datos_EE, c("Age_0-4_Ptge" = "Age_0to4_Ptge"))
+
+datos_EE$Densidad<-recode.na(datos_EE$Densidad,"?") #cambio ? por NA
+
+datos_EE$CCAA<-car::recode(datos_EE$CCAA, 
+                             "c('Ceuta','Melilla','Baleares')='Baleares, Ceuta y Melilla'") #agrupo baleares, ceuta y melilla
+
+datos_EE$ForeignersPtge<-replace(datos_EE$ForeignersPtge, which((datos_EE$ForeignersPtge < 0)), NA) # cambio valores fuera de rango a NA
+```
+
+Creo una nueva variable dicotomica basada en la variable ActividadPpal al combinar los factores Construccion, Industria, Servicios y ComercTTHosteleria. Luego creo variables binarias de Industria, Servicios, ComercTTHOsteleria y Construccion donde la observacion toma el valor de 1 si es mayor a 0. Luego me dare cuenta que no valio la pena hacer esto.
+
+Doy valores a las variables objetivo
+
+```{r, message=FALSE, warning=FALSE}
+datos_EE$ActividadEconomica<-car::recode(datos_EE$ActividadPpal, 
+                                         "c('Construccion','Industria','Servicios','ComercTTEHosteleria')='Sectores empresariales'") #agrupo C, C, I y S
+
+datos_EE$Industria_bin<-factor(replace(datos_EE$Industria, which(datos_EE$Industria > 0), 1))
+freq(datos_EE$Industria_bin)
+
+datos_EE$Construccion_bin<-factor(replace(datos_EE$Construccion, which(datos_EE$Construccion > 0), 1))
+freq(datos_EE$Construccion_bin)
+
+datos_EE$ComercTTEHosteleria_bin<-factor(replace(datos_EE$ComercTTEHosteleria, which(datos_EE$ComercTTEHosteleria > 0), 1))
+freq(datos_EE$ComercTTEHosteleria_bin)
+
+datos_EE$Servicios_bin<-factor(replace(datos_EE$Servicios, which(datos_EE$Servicios > 0), 1))
+freq(datos_EE$Servicios_bin)
+
+varObjCont<-datos_EE$Izda_Pct
+varObjBin<-datos_EE$Derecha
+```
+
+Categorizacion de variables continuas no normales (basado en los graphicos de dfplot).
+Utilize la funcion rpart para decidir los puntos para separar las variables. Debajo podes ver un ejemplo, el resto fueron borradas.
+Factorize las variables recategorizadas.
+
+```{r, message=FALSE, warning=FALSE}
+arbol_dec<-rpart(varObjCont~datos_EE$Explotaciones,data=datos_EE)
+
+arbol_dec
+
+datos_EE$Explotaciones<-ifelse(datos_EE$Explotaciones< 78.5, 0, 1)
+
+datos_EE$Industria<-ifelse(datos_EE$Industria< 34.20469, 0, 1)
+
+datos_EE$totalEmpresas<-ifelse(datos_EE$totalEmpresas< 34.3927, 0, 1)
+
+datos_EE$SUPERFICIE<-ifelse(datos_EE$SUPERFICIE< 3339.706, 0, ifelse(datos_EE$SUPERFICIE>=3339.706 & datos_EE$SUPERFICIE <10959.13, 1, ifelse(datos_EE$SUPERFICIE>=10959.13,2, NA)))
+
+datos_EE$Pob2010<-ifelse(datos_EE$Pob2010< 269.5, 0, 1)
+
+datos_EE$inmuebles<-ifelse(datos_EE$inmuebles< 293.5, 0, 1)
+
+datos_EE$Servicios<-ifelse(datos_EE$Servicios< 2, 0, ifelse(datos_EE$Servicios>=2 & datos_EE$Servicios <34.5, 1, ifelse(datos_EE$Servicios>=34.5, 2, NA)))
+
+datos_EE$ComercTTEHosteleria<-ifelse(datos_EE$ComercTTEHosteleria< 12.5, 0, 1)
+
+datos_EE$Construccion<-ifelse(datos_EE$Construccion< 2, 0, ifelse(datos_EE$Construccion>=2 & datos_EE$Construccion <17.5, 1, ifelse(datos_EE$Construccion>=17.5, 2, NA)))
+
+datos_EE$ConstructionUnemploymentPtge<-ifelse(datos_EE$ConstructionUnemploymentPtge< 0.821, 0, 1)
+
+
+datos_EE$IndustryUnemploymentPtge<-ifelse(datos_EE$IndustryUnemploymentPtge< 0.338, 0, 
+                                          ifelse(datos_EE$IndustryUnemploymentPtge>=0.338 & datos_EE$IndustryUnemploymentPtge <4.9945, 1, 
+                                          ifelse(datos_EE$IndustryUnemploymentPtge>=4.9945 & datos_EE$IndustryUnemploymentPtge<11.5695, 2, 
+                                          ifelse(datos_EE$IndustryUnemploymentPtge>=11.5695, 3,NA))))
+
+datos_EE$AgricultureUnemploymentPtge<-ifelse(datos_EE$AgricultureUnemploymentPtge< 5.757, 0, 1)
+
+datos_EE$UnemployLess25_Ptge<-ifelse(datos_EE$UnemployLess25_Ptge< 7.6465, 0, 1)
+
+datos_EE$DifComAutonPtge<-ifelse(datos_EE$DifComAutonPtge< 26.169, 0, 1)
+
+datos_EE$SameComAutonDiffProvPtge<-ifelse(datos_EE$SameComAutonDiffProvPtge< 9.5105, 0, 1)
+
+datos_EE$ForeignersPtge<-ifelse(datos_EE$ForeignersPtge< 0.035, 0, ifelse(datos_EE$ForeignersPtge>=0.035 & datos_EE$ForeignersPtge <3.675, 1, 
+                                                                  ifelse(datos_EE$ForeignersPtge>=3.675, 2, NA)))
+
+datos_EE$TotalCensus<-ifelse(datos_EE$TotalCensus< 241.5, 0, 1)
+
+datos_EE$Population<-ifelse(datos_EE$Population< 262.5, 0, 1)
+
+datos_EE[,c(4:5,13,15:17,20:22,24:28,30:32,36)] <- lapply(datos_EE[,c(4:5,13,15:17,20:22,24:28,30:32,36)], factor)
+```
+
+Separo las variables objetivo del set de datos para que no sean cambiadas por la funcion atipicosAmissing. 
+
+Cambio de atipicos a NA
+
+```{r, message=FALSE, warning=FALSE}
+input_EE<- as.data.frame(datos_EE[,-c(1,6:7)])
+row.names(input_EE)<-datos_EE$NameConcat 
+
+str(input_EE)
+
+psych::describe(Filter(is.numeric, input_EE))
+
+sapply(Filter(is.numeric, input_EE),function(x) atipicosAmissing(x)[[2]])/nrow(input_EE)
+
+input_EE[,as.vector(which(sapply(input_EE, class)=="numeric"))]<-sapply(Filter(is.numeric, input_EE),function(x) atipicosAmissing(x)[[1]])
+
+sum(is.na(input_EE))
+```
+
+miro que onda con las variables y los NA
+
+```{r, message=FALSE, warning=FALSE}
+summary(input_EE)
+
+dfplot(input_EE)
+```
+
+Debajo vemos la correlacion de NAs, es evidente que la presencia de perdidos en datos que se recogen por municipio. 
+
+```{r, message=FALSE, warning=FALSE}
+corrplot(cor(is.na(input_EE[colnames(input_EE)[colSums(is.na(input_EE))>0]])),method = "ellipse",type = "upper")
+```
+
+creo prop_missings.
+
+```{r, message=FALSE, warning=FALSE}
+input_EE$prop_missings<-apply(is.na(input_EE),1,mean)
+summary(input_EE$prop_missings)
+(prop_missingsVars<-apply(is.na(input_EE),2,mean))
+```
+
+Transformacion de NA a aleatorios
+Transformo las observaciones numericas y factoriales de NA a un numero aleatorio porque.....
+
+```{r, message=FALSE, warning=FALSE}
+input_EE[,as.vector(which(sapply(input_EE, class)=="numeric"))]<-sapply(Filter(is.numeric, input_EE),function(x) ImputacionCuant(x,"aleatorio"))
+
+input_EE[,as.vector(which(sapply(input_EE, class)=="numeric"))]<-sapply(Filter(is.numeric, input_EE),function(x) ImputacionCuant(x,"aleatorio"))
+
+input_EE[,as.vector(which(sapply(input_EE, class)=="numeric"))]<-sapply(Filter(is.numeric, input_EE),function(x) ImputacionCuant(x,"aleatorio"))
+
+input_EE[,as.vector(which(sapply(input_EE, class)=="factor"))]<-sapply(Filter(is.factor, input_EE),function(x) ImputacionCuali(x,"aleatorio"))
+
+input_EE[,as.vector(which(sapply(input_EE, class)=="character"))] <- lapply(input_EE[,as.vector(which(sapply(input_EE, class)=="character"))] , factor)
+
+summary(input_EE)
+```
+
+
+```{r include=FALSE, message=FALSE, warning=FALSE}
+saveRDS(cbind(varObjBin,varObjCont,input_EE),"EleccionesEspanaDep")
+```
+
+Veo como quedaron los datos despues de ser depurados y recategorizados. Todo lindo.
+
+```{r,message=FALSE, warning=FALSE}
+datos_EED<-cbind(varObjBin,varObjCont,input_EE)
+
+str(datos_EED)
+
+sapply(Filter(is.numeric, datos_EED),function(x) length(unique(x)))
+
+dfplot(datos_EED)
+```
+
+Quito las variables objetivo y creo dos variables aleatorias para luego medir mejor la correlacion de las otras variables con la objetivo, ya que las variables aleatorio no deberian tener influencia sobre la objetivo.
+
+```{r,message=FALSE, warning=FALSE}
+input_EED<-datos_EED[,-(1:2)]
+
+input_EED$aleatorio<-runif(nrow(input_EED))
+input_EED$aleatorio2<-runif(nrow(input_EED))
+```
+
+El V de Cramer me muestra la influencia de las variables numericas y factoriales sobre la variable objetivo.
+
+```{r,message=FALSE, warning=FALSE}
+graficoVcramer(input_EED,varObjCont)
+
+corrplot(cor(cbind(varObjCont,Filter(is.numeric, input_EED)), use="pairwise", 
+             method="pearson"), method = "number",type = "upper")
+```
+
+# Transformacion de variables numericas.
+
+Transformo las variables numericas y las dejo de lado para utilizarlas en las step.
+
+```{r,message=FALSE, warning=FALSE}
+input_cont<-cbind(input_EED,Transf_Auto(Filter(is.numeric, input_EED),varObjCont))
+
+sapply(Filter(is.numeric, input_EED)[,-ncol(Filter(is.numeric, input_EED))],function(x) length(unique(x)))
+
+saveRDS(data.frame(input_cont,varObjCont),"todo_cont_v")
+```
+
+Ya tenemos el set de datos listo.
+
+```{r,message=FALSE, warning=FALSE}
+todo_EE<-data.frame(input_EED,varObjCont)
+```
+
+Empezamos las regresiones!!
+separamos train y test
+
+```{r,message=FALSE, warning=FALSE}
+set.seed(342212)
+trainIndex <- createDataPartition(todo_EE$varObjCont, p=0.8, list=FALSE)
+data_train <- todo_EE[trainIndex,]
+data_test <- todo_EE[-trainIndex,]
+```
+
+Epa! Un adjusted R2 de 0.62! No esta nada mal para empezar. Tampoco esta tan lejos del r2 del test. Interesante..
+
+```{r,message=FALSE, warning=FALSE}
+modeloCompleto<-lm(varObjCont~.,data=data_train)
+summary(modeloCompleto)
+
+Rsq(modeloCompleto,"varObjCont",data_train)
+Rsq(modeloCompleto,"varObjCont",data_test)
+```
+
+Pruebo con las 3 primeras del vdecramer, un poco peor con el R2 de 0.589 pero interesante considerando que estamos usando solo 3 variables. Estoy empezando a sospechar que CCAA tiene mucha mas influencia sobre la variable objetivo que todas las demas variables.
+
+```{r,message=FALSE, warning=FALSE}
+modelo1<-lm(varObjCont~CCAA+Age_0to4_Ptge+SameComAutonDiffProvPtge,data=data_train)
+summary(modelo1)
+
+Rsq(modelo1,"varObjCont",data_train)
+Rsq(modelo1,"varObjCont",data_test)
+```
+
+pruebo con las primeras 5 de vdecramer, sube un poquito el R2 pero veo tambien que hay variables sin significancia. En este modelo agregamos variables de desempleo y alguna que otra demografica. Probemos con el siguiente modelo agregar mas variables economicas a ver que tal.
+
+```{r,message=FALSE, warning=FALSE}
+modelo1a<-lm(varObjCont~CCAA+Age_0to4_Ptge+SameComAutonDiffProvPtge+AgricultureUnemploymentPtge+IndustryUnemploymentPtge+
+               ConstructionUnemploymentPtge+Explotaciones,data=data_train)
+summary(modelo1a)
+
+Rsq(modelo1a,"varObjCont",data_train)
+Rsq(modelo1a,"varObjCont",data_test)
+```
+
+El R2 sigue subiendo! Pero ahora tenemos una cantidad absurda de coeficientes... Intentemos podar algunas de estas variables que no tienen significancia a ver si llegamos a algo bueno.
+
+```{r,message=FALSE, warning=FALSE}
+modelo2<-lm(varObjCont~CCAA+Age_0to4_Ptge+Age_19_65_pct+WomanPopulationPtge+ForeignersPtge+SameComAutonPtge+
+              DifComAutonPtge+UnemployLess25_Ptge+AgricultureUnemploymentPtge+IndustryUnemploymentPtge+
+              ConstructionUnemploymentPtge+ServicesUnemploymentPtge+ComercTTEHosteleria+ActividadPpal+inmuebles+
+              SUPERFICIE+Densidad+PersonasInmueble+Industria+totalEmpresas,data=data_train)
+summary(modelo2)
+
+Rsq(modelo2,"varObjCont",data_train)
+Rsq(modelo2,"varObjCont",data_test)
+```
+
+Vemos que el R2 callo un pelin pero esta bastante bien! Seguimos teniendo un monton de variables pero que le vamos a hacer si CCAA tiene 17 categorias y encima son todas significativas comparadas con la primera! Este modelo me esta gustando.. y los R2 del test estan cerca tambien.
+
+```{r,message=FALSE, warning=FALSE}
+modelo3<-lm(varObjCont~CCAA+Age_0to4_Ptge+Age_19_65_pct+WomanPopulationPtge+SameComAutonPtge+DifComAutonPtge+
+              UnemployLess25_Ptge+AgricultureUnemploymentPtge+IndustryUnemploymentPtge+ConstructionUnemploymentPtge+
+              ServicesUnemploymentPtge+ActividadPpal+inmuebles,data=data_train)
+summary(modelo3)
+
+Rsq(modelo3,"varObjCont",data_train)
+Rsq(modelo3,"varObjCont",data_test)
+```
+
+Y si intentamos alguna interaccion a ver que onda? Al ser tan dominante la influencia de CCAA parece obvio empezar por ahi, aunque esta el problema de las categorias... y obviamente los coeficientes se nos fueron de las manos. Me esta gustando mas y mas el modelo3.
+
+```{r,message=FALSE, warning=FALSE}
+modelo4<-lm(varObjCont~CCAA+Age_0to4_Ptge+Age_19_65_pct+WomanPopulationPtge+SameComAutonPtge+DifComAutonPtge+CCAA:UnemployLess25_Ptge+
+              AgricultureUnemploymentPtge+IndustryUnemploymentPtge+ConstructionUnemploymentPtge+
+              ServicesUnemploymentPtge+ActividadPpal+inmuebles,data=data_train)
+summary(modelo4)
+
+Rsq(modelo4,"varObjCont",data_train)
+Rsq(modelo4,"varObjCont",data_test)
+```
+
+Probemos una interaccion entre tasas de desempleo. Quizas las tasas de desempleo afectan los votos de la gente, cosa que suena bastante intuitiva. De paso veamos la interaccion ente CCAA e inmuebles. Quizas comunidades autonomas con mas desarollo inmoviliario afectan los votos.
+
+El R2 bajo un poco, los R2 del test se alejaron, y por encima de todo subieron aun mas las interacciones! Estas interacciones se estan tornando problematicas asi que dejemoslas de lado por ahora. Podemos ver que hay un poco de interaccion entre desempleo en construccion e industria, pero no tanto. Casi nada de significancia entre CCAA e inmuebles.. Y encima le estamos quitando significancia a CCAA. Comencemos la validacion cruzada con todos estos modelos que intentamos.
+
+```{r,message=FALSE, warning=FALSE}
+modelo5<-lm(varObjCont~CCAA+Age_0to4_Ptge+SameComAutonPtge+AgricultureUnemploymentPtge+ConstructionUnemploymentPtge:
+              IndustryUnemploymentPtge+inmuebles+Densidad+CCAA:inmuebles+ActividadEconomica,data=data_train)
+summary(modelo5)
+
+Rsq(modelo5,"varObjCont",data_train)
+Rsq(modelo5,"varObjCont",data_test)
+```
+
+##### Validacion Cruzada
+
+```{r,message=FALSE, warning=FALSE}
+modelo1VC <- train(formula(modelo1),
+                   data = todo_EE,method = "lm",
+                   trControl = trainControl(method="repeatedcv", number=5, repeats=20, returnResamp="all")
+)
+
+modelo1aVC <- train(formula(modelo1a),
+                   data = todo_EE,method = "lm",
+                   trControl = trainControl(method="repeatedcv", number=5, repeats=20, returnResamp="all")
+)
+modelo2VC <- train(formula(modelo2),
+                   data = todo_EE,method = "lm",
+                   trControl = trainControl(method="repeatedcv", number=5, repeats=20, returnResamp="all")
+)
+
+modelo3VC <- train(formula(modelo3),
+                   data = todo_EE,method = "lm",
+                   trControl = trainControl(method="repeatedcv", number=5, repeats=20, returnResamp="all")
+)
+
+modelo4VC <- train(formula(modelo4),
+                   data = todo_EE,method = "lm",
+                   trControl = trainControl(method="repeatedcv", number=5, repeats=20, returnResamp="all")
+)
+
+modelo5VC <- train(formula(modelo5),
+                   data = todo_EE,method = "lm",
+                   trControl = trainControl(method="repeatedcv", number=5, repeats=20, returnResamp="all")
+)
+
+results<-data.frame(rbind(modelo1VC$resample,modelo1aVC$resample,modelo2VC$resample,modelo3VC$resample,modelo4VC$resample,modelo5VC$resample),modelo=c(rep(1,100),rep(2,100),rep(3,100),rep(4,100),rep(5,100),rep(6,100)))
+```
+
+Podemos ver que los modelos 3 y 4 (modelo2 y modelo3) son los mejores en base a los R2. 
+
+```{r,message=FALSE, warning=FALSE}
+boxplot(Rsquared~modelo,data=results)
+```
+
+Veamos lo mismo pero de manera numerica.
+
+Las medias de los modelos 3 y 5 son las mas altas. Raro ya que en el boxplot el modelo 4 parecia mas alto. De todas maneras estan muy cerca.
+
+```{r,message=FALSE, warning=FALSE}
+aggregate(Rsquared~modelo, data = results, mean) #el 3 tiene mayor R2 medio
+aggregate(Rsquared~modelo, data = results, sd)
+```
+
+El modelo2 es el modelo que tiene el R2 mas alto comparado con los demas aunque tiene una estratosferica cantidad de coeficientes, 44 para ser exacto.
+Por otro lado el modelo 4 (modelo3) tiene un R2 bastante alto (comparativamente) y 34 coeficientes. Parece que un alza de .002 o .003 en R2 no vale la pena por la cantidad de coeficientes del modelo 2.
+
+```{r,message=FALSE, warning=FALSE}
+length(coef(modelo1));length(coef(modelo1a));length(coef(modelo2));length(coef(modelo3));length(coef(modelo4));length(coef(modelo5))  
+```
+
+#Ganador: modelo3
+
+```{r,message=FALSE, warning=FALSE}
+coef(modelo3)
+
+Rsq(modelo3,"varObjCont",data_train)
+Rsq(modelo3,"varObjCont",data_test)
+```
+
+La variable mas importante es CCAA, lejos. El porcentaje de votos de izquierda depende mucho de la region
+
+```{r,message=FALSE, warning=FALSE}
+modelEffectSizes(modelo3)
+barplot(sort(modelEffectSizes(modelo3)$Effects[-1,4],decreasing =T),las=2,main="Importancia de las variables (R2)") 
+```
+
+# Modelos step
+
+```{r,message=FALSE, warning=FALSE}
+todo_cont<-data.frame(input_cont,varObjCont)
+set.seed(131324)
+trainIndex2 <- createDataPartition(todo_cont$varObjCont, p=0.8, list=FALSE)
+data_train_cont <- todo_cont[trainIndex2,]
+data_test_cont <- todo_cont[-trainIndex2,]
+```
+
+Creamos particiones con regresiones simples y completas (sin las transformaciones).
+
+```{r,message=FALSE, warning=FALSE}
+null<-lm(varObjCont~1, data=data_train_cont)
+
+full<-lm(varObjCont~., data=data_train_cont[,c(1:38,57)]) 
+```
+
+los modelos AIC tienen mejor Rsquared pero mas coeficientes, puede ser que no valga la pena la mejora de r2 ante la mayor complejidad del modelo. Sin embargo parece que direccion sideways va a ser la mejor manera de encontrar un buen modelo.
+
+```{r,message=FALSE, warning=FALSE}
+modeloStepAIC<-step(null, scope=list(lower=null, upper=full),trace = FALSE, direction="both")
+summary(modeloStepAIC)
+Rsq(modeloStepAIC,"varObjCont",data_test_cont)
+
+modeloBackAIC<-step(full, scope=list(lower=null, upper=full), trace = FALSE,direction="backward")
+summary(modeloBackAIC)
+Rsq(modeloBackAIC,"varObjCont",data_test_cont) 
+
+modeloStepBIC<-step(null, scope=list(lower=null, upper=full), trace = FALSE,direction="both",k=log(nrow(data_train)))
+summary(modeloStepBIC)
+Rsq(modeloStepBIC,"varObjCont",data_test_cont)
+
+modeloBackBIC<-step(full, scope=list(lower=null, upper=full), trace = FALSE,direction="backward",k=log(nrow(data_train)))
+summary(modeloBackBIC)
+Rsq(modeloBackBIC,"varObjCont",data_test_cont)
+
+modeloStepAIC$rank
+modeloStepBIC$rank
+
+Rsq(modeloStepAIC,"varObjCont",data_train_cont)
+Rsq(modeloBackAIC,"varObjCont",data_train_cont)
+Rsq(modeloStepBIC,"varObjCont",data_train_cont)
+Rsq(modeloBackBIC,"varObjCont",data_train_cont)
+```
+
+Intentamos ahora la StepAIC y StepBIC con interacciones. Te voy a ser sincero, hacer el modeloStepAIC_Int le llevo mas de dos horas en procesar a mi ordenador. Por esa razon no la estoy incluyendo. Si bien este modelo daba un R2 de 0.655, tenia tambien mas de 200 coeficientes. Por eso me lo cargue.
+
+Igual tenemos el BIC que saco un R2 de .648! Pero con 44 coeficientes.. sigamos.
+
+```{r,message=FALSE, warning=FALSE}
+formInt<-formulaInteracciones(todo_cont[,c(1:38,57)],39)
+fullInt<-lm(formInt, data=data_train_cont)
+
+#Esto lleva mucho tiempo y resulta en demasiados coeficientes, mas de 200
+#modeloStepAIC_int<-step(null, scope=list(lower=null, upper=fullInt), direction="both")
+#summary(modeloStepAIC_int)
+#Rsq(modeloStepAIC_int,"varObjCont",data_test_cont) #Parecen algo mejores que los anteriores
+
+modeloStepBIC_int<-step(null, scope=list(lower=null, upper=fullInt),trace = FALSE, direction="both",k=log(nrow(data_train_cont)))
+summary(modeloStepBIC_int)
+Rsq(modeloStepBIC_int,"varObjCont",data_test_cont) #el adjusted rsquared es mucho mejor
+
+#modeloStepAIC_int$rank #muchos más parámetros
+modeloStepBIC_int$rank #este tiene un cuarto de los parametros, elijo este aunque el r2 sea menor
+```
+
+Probamos con las transformadas a ver que tal.
+
+El AIC_trans tiene 56 coeficientes y un R2 de 0.63, pero el BIC_trans tiene 31 coeficientes y un R2 un pelin mas bajo! Epa!
+
+```{r,message=FALSE, warning=FALSE}
+fullT<-lm(varObjCont~., data=data_train_cont)
+
+modeloStepAIC_trans<-step(null, scope=list(lower=null, upper=fullT), trace = FALSE,direction="both")
+summary(modeloStepAIC_trans)
+Rsq(modeloStepAIC_trans,"varObjCont",data_test_cont)#se acopla bien al adjusted r2 del test
+
+modeloStepBIC_trans<-step(null, scope=list(lower=null, upper=fullT),trace = FALSE, direction="both",k=log(nrow(data_train_cont)))
+summary(modeloStepBIC_trans)
+Rsq(modeloStepBIC_trans,"varObjCont",data_test_cont) 
+
+modeloStepAIC_trans$rank 
+modeloStepBIC_trans$rank #la diferencia de parametros no es tan grande como la anterior, pero igual BIC es menor, igual pruebo con los dos a ver que onda
+```
+
+Probemos con interacciones y transformaciones. Otra vez no voy a incluir el AIC por miedo a que mi ordenador explote y en la sabiduria que la cantidad de coeficientes me va a hacer llorar.
+
+BIC_transInt tiene un R2 altisimo (0.65) pero tambien 47 coeficientes. No me pareceque vale la pena. Sigamos.
+
+```{r,message=FALSE, warning=FALSE}
+formIntT<-formulaInteracciones(todo_cont,57)
+fullIntT<-lm(formIntT, data=data_train_cont)
+
+#Esto lleva mucho tiempo y resulta en demasiados coeficientes, mas de 200
+#modeloStepAIC_transInt<-step(null, scope=list(lower=null, upper=fullIntT), direction="both")
+#summary(modeloStepAIC_transInt)
+#Rsq(modeloStepAIC_transInt,"varObjCont",data_test_cont) # se parece el valor a los int sin transf
+
+modeloStepBIC_transInt<-step(null, scope=list(lower=null, upper=fullIntT),trace = FALSE, direction="both",k=log(nrow(data_train_cont)))
+summary(modeloStepBIC_transInt)
+Rsq(modeloStepBIC_transInt,"varObjCont",data_test_cont) # 
+
+#modeloStepAIC_transInt$rank # este tiene demasiados coeficientes, igual que el AIC_trans, mejor ir con el otro.
+modeloStepBIC_transInt$rank
+```
+
+## Pruebo los mejores de cada con validacion cruzada repetida
+
+Claramente el modeloStepBIC_int y modeloStepBIC_transInt son los que tienen el R2 mas alto.
+
+```{r,message=FALSE, warning=FALSE}
+total<-c()
+modelos<-sapply(list(modelo3,modelo2,modeloStepAIC,modeloStepBIC,modeloStepBIC_int,modeloStepBIC_trans,modeloStepBIC_transInt),formula)
+for (i in 1:length(modelos)){
+  set.seed(43534)
+  vcr<-train(as.formula(modelos[[i]]), data = data_train_cont,
+             method = "lm",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      returnResamp="all")
+  )
+  total<-rbind(total,cbind(vcr$resample[,1:2],modelo=rep(paste("Modelo",i),
+                                                         nrow(vcr$resample))))
+}
+boxplot(Rsquared~modelo,data=total,main="R-Square") 
+aggregate(Rsquared~modelo, data = total, mean) 
+aggregate(Rsquared~modelo, data = total, sd) 
+```
+
+En la validacion cruzada salen como mejores modelos el modeloStepBIC_Int y modeloStepBIC_transInt, tinen 44 y 47 coeficientes respectivamente. El R2 de estos modelos es similar, asi que podemos elegir el que tiene menos coeficientes: modeloStepBIC_int.
+
+```{r,message=FALSE, warning=FALSE}
+modelo3$rank
+modelo2$rank
+modeloStepAIC$rank
+modeloStepBIC$rank
+modeloStepBIC_int$rank
+modeloStepBIC_trans$rank
+modeloStepBIC_transInt$rank
+
+Rsq(modelo3,"varObjCont",data_test_cont)
+Rsq(modeloStepBIC,"varObjCont",data_test_cont)
+Rsq(modeloStepBIC_trans,"varObjCont",data_test_cont)
+
+length(coef(modelo3))
+length(coef(modeloStepBIC_trans))
+
+formula(modelo3)
+formula(modeloStepBIC_trans)
+```
+La pregunta entonces es, estoy dispuesto a bancarme 44 coeficientes por tener un R2 de 0.64? Probablemente no.
+El mejor modelo para mi es modeloStepBIC_trans porque tiene un r2 alto y tiene 32 coeficientes. Modelos alternativos son el modeloStepBIC y modelo3.
+modelo 3 tiene un r2 mas alto pero tiene mas coeficientes aun, y el modeloStepBIC tiene un r2 una pisca mas bajo pero menos coeficientes. 
+El modelo modeloStepBIC_trans esta en el medio y ademas encuentra correlacion con las variables transformadas.
+Para refinar aun mas el modelo intentaria reemplazar variables en el modelo3 con las mismas variables transformadas para bajar 
+coeficientes aun mas y quizas subir el r2.
+
+Podemos ver entonces que el 
+```{r}
+modelEffectSizes(modeloStepBIC_trans)
+barplot(sort(modelEffectSizes(modeloStepBIC_trans)$Effects[-1,4],decreasing =T),las=2,main="Importancia de las variables (R2)") 
+```
+
+## Interpretacion
+
+*Variable numerica (Age_0to4_Ptge)
+  *El aumento unitatio del porcentaje de ciudadanos de esa edad disminuira el porcentaje de votos que recibe la izquierda por 0.6 en ese municipio.
+  
+*Variable binaria (AgricultureUnemploymentPtge1)
+  *Esta es mas complicada y para interpretarla es necesario ver la categorizacion realizada sobre esta variable. La categoria 1 de AgricultureUnemploymentPtge incluye valores iguales o mayores de 5.757. Esto quiere decir que si un municipio tiene un porcentaje de desempleo en la industria agricultora mayor o igual a 5.757%, entonces era recategorizada como 2.
+  *Un municipio con un porcentaje de desempleo en industria agricultora mayor o igual a 5.757% vera un incremento del porcentaje de votos que recie la izquierda por 1.37 en ese municipio.
+
+```{r}
+coef(modeloStepBIC_trans)
+```

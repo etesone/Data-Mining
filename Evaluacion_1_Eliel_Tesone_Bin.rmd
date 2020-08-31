@@ -1,0 +1,277 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+# Regresion Logistica
+
+Subo el archivo EleccionesEspanaDep junto con las librerias que voy a usar.
+
+Para modelizar la variable objetivo continua utilize rpart para categorizar algunas variables numericas. Para la objetivo binaria intente usar rpart tambien, pero no me daba categorias. Intente por un lado usar los datos hechos para la objetivo continua y por el otro transformando los datos unicamente usando atipicosAmissing. Los datos hechos para la continua andaron mucho mejor a la hora de modelizar, entonces por eso utilizo los mismos datos.
+
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+source("Funciones_R.R")
+
+paquetes(c("questionr","psych","car","corrplot","readxl","ggplot2","gdata","caret","lmSupport","rpart","glmnet","dplyr","epiDisplay","pROC"))
+
+datos_EED <- readRDS("EleccionesEspanaDep")
+```
+
+Creo aleatorios
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+varObjBin <- datos_EED$varObjBin
+
+input_EED<-datos_EED[,-c(1:2,41)]#saco prop_missing
+
+input_EED$aleatorio<-runif(nrow(input_EED))
+input_EED$aleatorio2<-runif(nrow(input_EED))
+```
+
+Transformo de variables numericas
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+input_bin<-cbind(input_EED,Transf_Auto(Filter(is.numeric, input_EED),varObjBin))
+
+saveRDS(data.frame(input_bin,varObjBin),"todo_bin_V")
+```
+
+Variable Objetivo Binaria
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+todo_bin<-data.frame(input_EED,varObjBin)
+```
+
+Veo gráficamente el efecto de dos variables cualitativas sobre la binaria
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+graficoVcramer(input_EED,varObjBin)
+```
+
+
+Municipios con Otros sectores tienden a votar mayoria Derecha
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+mosaico_targetbinaria(input_EED$ActividadEconomica,varObjBin,"Sectores de comercio, servicio, industria y construccion")
+mosaico_targetbinaria(input_EED$ActividadPpal,varObjBin,"Clasificacion") #esta sí influye
+mosaico_targetbinaria(input_EED$SUPERFICIE,varObjBin,"Clasificacion") #no influye
+mosaico_targetbinaria(input_EED$Densidad,varObjBin,"Clasificacion") #Municipios con muy baja densidad tienden a votar mayoritariamente Derecha
+mosaico_targetbinaria(input_EED$Servicios,varObjBin,"Clasificacion") #no influye
+```
+
+Veo gráficamente el efecto de dos variables cuantitativas sobre la binaria
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+boxplot_targetbinaria(input_EED$Age_over65_pct,varObjBin,"% de mayores de 65") # municipios con mayor porcentaje tienden a votar derecha mas que izquierda
+boxplot_targetbinaria(input_EED$PersonasInmueble,varObjBin,"Personas por inmueble") # mientras mas personas por inmueble en un municipio, menos votan mayoria derecha.
+```
+
+
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+hist_targetbinaria(input_EED$Age_over65_pct,varObjBin,"% mayores de 65") 
+hist_targetbinaria(input_EED$PersonasInmueble,varObjBin,"Personas por inmueble")
+```
+
+Hago la partición
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+set.seed(43452)
+trainIndex3 <- createDataPartition(todo_bin$varObjBin, p=0.8, list=FALSE)
+data_train_bin <- todo_bin[trainIndex3,]
+data_test_bin <- todo_bin[-trainIndex3,]
+```
+
+pruebo un primer modelo sin las transformadas
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo1b<-glm(varObjBin~.,data=data_train_bin,family=binomial)
+summary(modelo1b)
+pseudoR2(modelo1b,data_train_bin,"varObjBin")
+pseudoR2(modelo1b,data_test_bin,"varObjBin")
+modelo1b$rank
+```
+
+Pruebo con las variables que tienen significancia en el primer modelo.
+
+El AIC es mas bajo y el R2 tambien, pero por un pelin. Tiene 34 coeficientes.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo2b<-glm(varObjBin~CCAA+UnemployLess25_Ptge+ConstructionUnemploymentPtge+ServicesUnemploymentPtge+IndustryUnemploymentPtge+AgricultureUnemploymentPtge+Unemploy25_40_Ptge+ActividadPpal+DifComAutonPtge+Age_19_65_pct+ForeignersPtge+Industria,data=data_train_bin,family=binomial)
+summary(modelo2b)
+pseudoR2(modelo2b,data_train_bin,"varObjBin")
+pseudoR2(modelo2b,data_test_bin,"varObjBin")
+modelo2b$rank
+```
+
+Pruebo con mas variables economicas y menos variables de desempleo.
+AIC aun mas bajo y R2 mas alto con 33 coeficentes. Me gusta.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo3b<-glm(varObjBin~CCAA+ConstructionUnemploymentPtge+AgricultureUnemploymentPtge+ActividadPpal+DifComAutonPtge+Age_19_65_pct+
+                ForeignersPtge+Industria+Construccion+Servicios+ComercTTEHosteleria,data=data_train_bin,family=binomial)
+summary(modelo3b)
+pseudoR2(modelo3b,data_train_bin,"varObjBin")
+pseudoR2(modelo3b,data_test_bin,"varObjBin")
+modelo3b$rank
+```
+
+Pruebo con interacciones.
+Peor
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo4b<-glm(varObjBin~CCAA+ConstructionUnemploymentPtge+AgricultureUnemploymentPtge+ActividadPpal+DifComAutonPtge+Age_19_65_pct+
+                ForeignersPtge+Industria+CCAA:Industria+Age_over65_pct:Age_0to4_Ptge,data=data_train_bin,family=binomial)
+summary(modelo4b)
+pseudoR2(modelo4b,data_train_bin,"varObjBin")
+pseudoR2(modelo4b,data_test_bin,"varObjBin")
+modelo4b$rank
+```
+
+Cambio interacciones.
+Practicamente igual que el anterior.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo5b<-glm(varObjBin~CCAA+ConstructionUnemploymentPtge+AgricultureUnemploymentPtge+ActividadPpal+DifComAutonPtge+Age_19_65_pct+
+                ForeignersPtge+Industria+CCAA:Industria+Age_over65_pct+Age_0to4_Ptge,data=data_train_bin,family=binomial)
+summary(modelo5b)
+pseudoR2(modelo5b,data_train_bin,"varObjBin")
+pseudoR2(modelo5b,data_test_bin,"varObjBin")
+modelo5b$rank
+```
+
+Cambio interacciones otra vez.
+Peor AIC.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo6b<-glm(varObjBin~CCAA+ConstructionUnemploymentPtge:AgricultureUnemploymentPtge+ActividadEconomica+DifComAutonPtge+
+                ForeignersPtge+Industria+CCAA:Industria+Age_over65_pct:Age_0to4_Ptge,data=data_train_bin,family=binomial)
+summary(modelo6b)
+pseudoR2(modelo6b,data_train_bin,"varObjBin")
+pseudoR2(modelo6b,data_test_bin,"varObjBin")
+modelo6b$rank
+```
+
+##Validacion cruzada repetida para elegir entre todos
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+auxVarObj<-todo_bin$varObjBin
+todo_bin$varObjBin<-make.names(todo_bin$varObjBin) #formateo la variable objetivo para que funcione el codigo
+total<-c()
+modelos<-sapply(list(modelo1b,modelo2b,modelo3b,modelo4b,modelo5b,modelo6b),formula)
+for (i in 1:length(modelos)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos[[i]]), data = todo_bin,
+             method = "glm", family="binomial",metric = "ROC",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      summaryFunction=twoClassSummary,
+                                      classProbs=TRUE,returnResamp="all")
+  )
+  total<-rbind(total,data.frame(roc=vcr$resample[,1],modelo=rep(paste("Modelo",i),
+                                                                nrow(vcr$resample))))
+}
+```
+
+La cosa esta dificil, los ROC son bastante parejos entre todos los modelos. El 6 queda descartado y probablemente el 4 tenga el mejor ROC. Veamos cuantos coeficientes tenemos.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+boxplot(roc~modelo,data=total,main="Área bajo la curva ROC") 
+aggregate(roc~modelo, data = total, mean) 
+aggregate(roc~modelo, data = total, sd)
+```
+
+recupero la variable objetivo en su formato
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+todo_bin$varObjBin<-auxVarObj
+```
+
+Uff el modelo 4 tiene 45 parametros! Demasiados.
+
+El modelo 3 tiene la menor cantidad de parametros lejos y tiene un R2 similar a los demas modelos.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+modelo1b$rank
+modelo2b$rank 
+modelo3b$rank
+modelo4b$rank 
+modelo5b$rank
+```
+
+BUscamos el mejor punto de corte, asi que gráfico de las probabilidades obtenidas.Quizas por .6? Un pelin menos quizas.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+hist_targetbinaria(predict(modelo3b, newdata=data_test_bin,type="response"),data_test_bin$varObjBin,"probabilidad")
+```
+
+Probemos estos dos cortes para darnos una idea de que esta pasando.
+
+No estan tan mal! Diria que probablemente el .5 esta mas cerca.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+sensEspCorte(modelo3b,data_test_bin,"varObjBin",0.5,"1")
+sensEspCorte(modelo3b,data_test_bin,"varObjBin",0.75,"1")
+```
+
+generamos una rejilla de puntos de corte
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+posiblesCortes<-seq(0,1,0.01)
+rejilla<-data.frame(t(rbind(posiblesCortes,sapply(posiblesCortes,function(x) sensEspCorte(modelo3b,data_test_bin,"varObjBin",x,"1")))))
+rejilla$Youden<-rejilla$Sensitivity+rejilla$Specificity-1
+plot(rejilla$posiblesCortes,rejilla$Youden)
+plot(rejilla$posiblesCortes,rejilla$Accuracy)
+rejilla$posiblesCortes[which.max(rejilla$Youden)]
+rejilla$posiblesCortes[which.max(rejilla$Accuracy)]
+```
+
+Los compare y despues de jugar un rato con los cortes llegue al corte ganador: 0.58.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+sensEspCorte(modelo3b,data_test_bin,"varObjBin",0.58,"1")
+sensEspCorte(modelo3b,data_test_bin,"varObjBin",0.41,"1")
+```
+
+Vemos las variables más importantes del modelo ganador.
+
+Al igual que con la variable objetivo continua, a variable mas importante es CCAA.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+impVariablesLog(modelo3b,"varObjBin",dd=data_test_bin) 
+```
+
+Vemos los coeficientes del modelo ganador. Lindos, no?
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+coef(modelo3b)
+```
+
+Evaluamos la estabilidad del modelo a partir de las diferencias en train y test. El R2 es lo que es alto comparado con los otros modelos y el R2 del train es muy similar al del test.
+
+Tenemos un ROC de .899, si fuesemos generosos diriamos .9 que esta bueno.
+
+Tambien le esta yendo bastante bien en las predicciones del test.
+
+```{r message=FALSE, warning=FALSE,tidy=TRUE}
+pseudoR2(modelo3b,data_train_bin,"varObjBin")
+pseudoR2(modelo3b,data_test_bin,"varObjBin")
+roc(data_train_bin$varObjBin, predict(modelo3b,data_train_bin,type = "response"), direction="<")
+roc(data_test_bin$varObjBin, predict(modelo3b,data_test_bin,type = "response"), direction="<")
+sensEspCorte(modelo3b,data_train_bin,"varObjBin",0.58,"1")
+sensEspCorte(modelo3b,data_test_bin,"varObjBin",0.58,"1")
+```
+
+## Interpretacion
+
+*Variable numerica (Age_19_65_pct)
+  *El aumento unitatio del porcentaje de ciudadanos de esa edad en el municipio disminuira el OR de que en el municipio haya una mayoria de votos a la derecha por 0.035.
+  
+*Variable binaria (AgricultureUnemploymentPtge1)
+  *La probabiilidad de que en el municipio haya una mayoria de votos a la derecha es 0.78 veces mayor en municipios con desempleo en industria agricultora mayor al 5.757% (AgricultureUnemploymentPtge=1) que menor (AgricultureUnemploymentPtge=0). 
+  
+```{r}
+coef(modelo3b)
+logistic.display(modelo3b)
+```
+
+No vale la pena intentar step porque la gran mayoria de la variable objetivo es expliada por CCAA y el modelo es bastante predictivo.
+Ademas usar los step va a subir muchisimo la cantidad de coeficientes inevitablemente.

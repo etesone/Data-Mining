@@ -1,0 +1,225 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+# Evaluacion 2
+
+##Series Temporales
+
+Los datos que decidi utilizar tienen la concentración mensual de CO2 en (ppm) entre 1974 y 1985 medido en el Observatorio Mauna Loa, Hawaii.
+
+Los datos pueden ser encontrados aqui: https://www.itl.nist.gov/div898/handbook/pmc/section4/pmc4411.htm
+
+```{r}
+source("Funciones_R.R")
+
+# Cargar librerias
+paquetes(c('readxl','fpp2','tseries','forecast','ggplot2','seasonal','descomponer','TSA'))
+
+datos <- read_xlsx("MonthlyCO2Concentrations.xlsx")
+```
+
+Separo los datos, la serie parece tener estacionalidad.
+
+```{r}
+co2<- ts(datos[,-1], start=c(1974,5), frequency=12)
+
+autoplot(co2)
+
+adf.test(co2)
+```
+
+Hago una descomposicion de la serie, tiene tendencia creciente y es estacional.
+
+```{r}
+
+co2_comp<- decompose(co2,type=c("multiplicative"))
+
+# Representacion de la descomposiciÃ³n
+autoplot(co2_comp)
+
+# Coeficientes debidos a la estacionalidad 
+co2_comp$figure
+```
+
+Contraste de normalidad de los residuos, para ver si es normal
+
+```{r}
+ks.test(co2_comp$random,'pnorm') 
+shapiro.test(co2_comp$random)
+```
+
+Seleccionamos toda la serie excepto los ultimos 10 valores para ajustar los modelos y luego Seleccionamos los ultimos 10 valores para comparar predicciones
+
+Luego hacemos un suavizado exponencial simple ses() con prediccion a un año
+
+```{r}
+co2_train<-window(co2,end=c(1986,11))
+
+ 
+co2_test<-window(co2,start=c(1986,12))
+
+
+co2_s1<-ses(co2_train, h=10)
+```
+
+Representamos los valores observados y los suavizados con la prediccion, no va bien, puede mejorar mucho la prediccion.
+
+```{r}
+autoplot(co2_s1) +
+  autolayer(fitted(co2_s1), series="Fitted") +autolayer(co2_test, series="actual") +
+  ylab("viajeros") + xlab("Mes/AÃ±o")
+```
+
+Vemos el suavizado doble de Holt, aun no va bien la prediccion y puede mejorar
+
+```{r include=FALSE}
+###  Suavizado Exponencial doble de Holt 
+co2_sh <- holt(co2_train, h=10)
+
+# InspecciÃ³n del objeto creado y DistribuciÃ³n de residuos
+print(co2_sh)
+co2_sh$model
+autoplot(co2_sh$residuals)
+```
+
+```{r}
+#Representamos los valores observados y los suavizados con la predicciÃ³n 
+autoplot(co2_sh) +
+  autolayer(fitted(co2_sh), series="Fitted") +autolayer(co2_test, series="actual") +
+  ylab("viajeros") + xlab("Mes/AÃ±o")
+```
+
+Ahora usamos Holt-Winters y vemos que la prediccion se ajusta muy bien a los datos de test. Ganador!
+
+```{r}
+### Suavizado Exponencial con estacionalidad. Holt-Winters
+co2_hw <- hw(co2_train, seasonal='multiplicative', h=10, level = c(80, 95))
+#print(co2_hw)
+
+co2_hw$model
+autoplot(co2_hw$residuals)
+checkresiduals(co2_hw)
+
+#Representamos los valores observados y los suavizados con la predicciÃ³n 
+autoplot(co2_hw) +
+  autolayer(fitted(co2_hw), series="Fitted") +autolayer(co2_test, series="actual") +
+  ylab("viajeros") + xlab("Mes/AÃ±o")
+```
+
+La precision de Holt-Winters es mucho mayor a las otras dos.
+
+```{r}
+
+accuracy(co2_s1,co2_test)
+accuracy(co2_sh,co2_test)
+accuracy(co2_hw,co2_test)
+```
+
+### ARIMA
+
+Calculamos las autocorrelaciones simples hasta el retardo 48 y despues la diferenciamos una vez.
+
+
+```{r}
+#Calculamos  las autocorrelaciones simples hasta el retardo 48
+ggAcf(co2, lag=48)
+
+# Diferenciamos uno
+ggtsdisplay(diff(co2), lag.max = 48)
+```
+
+Probamos algunas series manuales. Voy a utilizar una sola diferenciacion ya que despues de la primera el ACF no llega a cero. Luego de la diferenciacion de esta serie los retrasos mas explicatvos para armar el modelo son los primeros lags, asi que no voy a probar mas de 2.
+
+```{r}
+fit1 <- co2 %>%  Arima(order=c(1,1,1), seasonal=c(1,1,0)) 
+
+#fit1 %>%  residuals()  %>% ggtsdisplay()
+
+fit2 <- co2 %>%  Arima(order=c(1,1,1), seasonal=c(0,1,1)) 
+
+fit2 %>%  residuals()  %>% ggtsdisplay()
+
+fit3 <- co2 %>%  Arima(order=c(1,1,0), seasonal=c(1,1,0)) 
+
+#fit3 %>%  residuals()  %>% ggtsdisplay()
+
+fit4 <- co2 %>%  Arima(order=c(1,1,2), seasonal=c(1,1,0)) 
+
+#fit4 %>% residuals() %>% ggtsdisplay()
+```
+
+
+lanzo un auto.arima y lo comparo con los modelos anteriores. El modelo fit2 y fit_auto tienen AIC mas bajo.
+
+```{r}
+#Ajuste con la funciÃ³n auto.arima
+fit_auto <- auto.arima(co2,seasonal=TRUE)
+fit_auto %>% residuals() %>% ggtsdisplay()
+
+# Coeficientes de los modelos
+fit1
+fit2
+fit3
+fit4
+fit_auto
+```
+
+###Accuracy
+
+fit2 tiene el MPE mas bajo de todos, entonces tiene la mayor exactitud.
+
+```{r}
+round(accuracy(fit2),3) # MPE mas bajo
+round(accuracy(fit_auto),3)
+```
+
+Las predicciones tienen buena pinta con el fit2!
+
+```{r}
+cbind("Concentracion de CO2" = co2,
+      "Valores ajustados" =fitted(fit2)) %>%
+  autoplot() + xlab("trimestre") + ylab("") +
+  ggtitle("Concentracion de CO2 observada y ajustada")
+```
+
+###Pruebas y comparaciones training/test
+
+Hacemos nuevas ventanas de ajuste y evaluacion 
+
+```{r}
+co2_tr<-window(x = co2, end=c(1986,11))
+co2_tst<-window(x = co2, start=c(1986,12))
+```
+
+hacemos un train para las variables
+
+```{r}
+fit2_tr <- Arima(co2_tr,order=c(1,1,1), seasonal=c(0,1,1)) 
+fit_auto_tr <- Arima(co2_tr,order=c(1,0,1), seasonal=c(2,1,2)) 
+```
+
+fit2 sigue teniendo el MPE mas bajo de todos, entonces tiene la mayor exactitud.
+
+```{r}
+accuracy(fit2_tr) 
+accuracy(fit_auto_tr)
+```
+
+Predicciones 
+
+```{r}
+pred2<-forecast(fit2_tr, h=20)
+pred_auto<-forecast(fit_auto_tr, h=20)
+```
+
+Valores de ajuste en test, sigue ganando el modelo fit2.
+
+```{r}
+accuracy(pred2,co2_tst)
+accuracy(pred_auto,co2_tst)
+```
+
+Ganador: modelo fit2
+
